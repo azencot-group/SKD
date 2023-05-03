@@ -1,10 +1,10 @@
 import copy
 import torch
-from torch import nn
 import numpy as np
-from src.utils.general_utils import t_to_np, get_sorted_indices, static_dynamic_split
+from torch import nn
 import torchvision.transforms as T
-from koopman_utils import get_unique_num
+from koopman_utils import get_unique_num, get_sorted_indices, static_dynamic_split
+from utils import t_to_np, np_to_t
 
 
 class KoopmanCNN(nn.Module):
@@ -13,7 +13,6 @@ class KoopmanCNN(nn.Module):
         super(KoopmanCNN, self).__init__()
 
         self.args = args
-        self.run = None
 
         self.encoder = encNet(self.args)
         self.drop = torch.nn.Dropout(self.args.dropout)
@@ -22,21 +21,28 @@ class KoopmanCNN(nn.Module):
 
         self.loss_func = nn.MSELoss()
 
-        self.names = ['total', 'rec', 'predict_ambient', 'predict_latent', 'eigs', 'orthg']
+        self.names = ['total', 'rec', 'predict_ambient', 'predict_latent', 'eigs']
 
-    def forward(self, X):
-        # ----- input noise ----- #
-        if self.training and self.args.noise in ["input"]:
-            X = self.add_noise_to_input(X)
+    def forward(self, X, train=True):
+        # input noise
+        if train and self.args.noise in ["input"]:
+            blurrer = T.GaussianBlur(kernel_size=(5, 9), sigma=(0.1, 3))
+            X = torch.concat([torch.concat([blurrer(x).unsqueeze(0) for x in X], dim=0) for _ in range(1)])
 
-        # ----- X.shape: b x t x c x w x h ----- #
+        # ----- X.shape: b x t x c x w x h ------
         Z = self.encoder(X)
 
-        # ----- koopman ----- #
+        # latent both noise
+        if train and self.args.noise in ["latent_both"]:
+            Z = Z + 0.25 * torch.rand(Z.shape).to(Z.device)
+
         Z2, Ct = self.dynamics(Z)
         Z = self.drop(Z)
 
-        # ----- decoder ----- #
+        # latent reconstruction noise
+        if train and self.args.noise in ["latent_rec"]:
+            Z = Z + 0.25 * torch.rand(Z.shape).to(Z.device)
+
         X_dec = self.decoder(Z)
         X_dec2 = self.decoder(Z2)
 
@@ -55,7 +61,6 @@ class KoopmanCNN(nn.Module):
         a2 = self.args.w_pred
         a3 = self.args.w_pred
         a4 = self.args.w_eigs
-        a5 = self.args.w_ort
 
         # reconstruction
         E1 = self.loss_func(X, X_dec)
@@ -63,19 +68,62 @@ class KoopmanCNN(nn.Module):
         # Koopman losses
         E2, E3, E4 = self.dynamics.loss(X_dec, X_dec2, Z, Z2, Ct)
 
-        # Add orthogonality loss
-        E5 = torch.linalg.norm(Ct @ Ct.T - Ct.T @ Ct, ord='fro') ** 2
-
         # LOSS
-        loss = a1 * E1 + a2 * E2 + a3 * E3 + a4 * E4 + a5 * E5
+        loss = a1 * E1 + a2 * E2 + a3 * E3 + a4 * E4
 
-        return loss, E1, E2, E3, E4, E5
+        return loss, E1, E2, E3, E4
 
-    def forward_fixed_ma_for_classification(self, X, fix_motion, pick_type='real'):
+    def swap(self, Zp, I, J, U):
+        # swap J factors with shuffle I,
+        import copy
+
+        # swap certain features
+        Zp_tmp = copy.deepcopy(Zp)
+        Zp_tmp[:, :, J] = Zp_tmp[I][:, :, J]
+        Z_tmp = Zp_tmp @ U
+
+        self.eval()
+        with torch.no_grad():
+            X_tmp = self.decode(np_to_t(np.real(Z_tmp))).squeeze()
+
+        return X_tmp
+
+    def factorial_swap(self, classifier, X, Zp, I, J, U):
+        # swap J factors with shuffle I, and eval accuracy
+        get_lbl = lambda pred: np.argmax(t_to_np(pred), axis=1)
+        get_acc = lambda lbl1, lbl2: np.sum(lbl1 == lbl2) / len(lbl2)
+
+        classifier.eval()
+        with torch.no_grad():
+            # action, skin, pant, top, hair
+            preds = classifier(X[I])
+
+        lbls = list(map(get_lbl, preds))
+
+        import copy
+
+        # swap certain features
+        Zp_tmp = copy.deepcopy(Zp)
+        Zp_tmp[:, :, J] = Zp_tmp[I][:, :, J]
+        Z_tmp = Zp_tmp @ U
+
+        self.eval()
+        with torch.no_grad():
+            X_tmp = self.decode(np_to_t(np.real(Z_tmp))).squeeze()
+
+        classifier.eval()
+        with torch.no_grad():
+            preds_tmp = classifier(X_tmp)
+        lbls_tmp = list(map(get_lbl, preds_tmp))
+
+        accs = list(map(get_acc, lbls_tmp, lbls))
+        return accs, lbls_tmp, lbls
+
+    def forward_fixed_ma_for_classification(self, X, fix_motion, conj_pick=True, pick_type='norm'):
         # ----- X.shape: b x t x c x w x h ------
         Z = self.encoder(X)
         Z2, Ct = self.dynamics(Z)
-        # Z = self.drop(Z)
+        Z = self.drop(Z)
 
         Z_old_shape = Z.shape
 
@@ -93,6 +141,13 @@ class KoopmanCNN(nn.Module):
         U = np.linalg.inv(V)
 
         # static/dynamic split
+        if pick_type == 'real':
+            I = np.argsort(np.real(D))
+        elif pick_type == 'norm':
+            I = np.argsort(np.abs(D))
+        else:
+            raise Exception("no such method")
+
         I = get_sorted_indices(D, pick_type)
         Id, Is = static_dynamic_split(D, I, pick_type, self.args.static_size)
 
@@ -149,13 +204,13 @@ class KoopmanCNN(nn.Module):
         I = get_sorted_indices(D, pick_type)
         Id, Is = static_dynamic_split(D, I, pick_type, self.args.static_size)
 
-        convex_size = 2
+        convex_size = 5
 
         for ii in range(bsz):
             S1, Z1 = X[ii].squeeze(), Z[ii].squeeze()
 
             A = np.random.rand(convex_size)  # random coefs
-            Ac = np.exp(A) / sum(np.exp(A))  # normalize sum to one
+            Ac = np.exp(A)/sum(np.exp(A))  # normalize sum to one
             Ac = np.expand_dims(Ac, axis=1) @ np.ones((1, convex_size))
 
             J = np.random.permutation(Z.shape[0])[:convex_size]
@@ -205,18 +260,12 @@ class KoopmanCNN(nn.Module):
 
         convex_size = 2
 
-        Js = [np.random.permutation(bsz) for _ in range(convex_size)]  # convex_size permutations
+        Js = [np.random.permutation(bsz) for _ in range(convex_size)]       # convex_size permutations
         # J = np.random.permutation(bsz)              # bsz
         # J2 = np.random.permutation(bsz)
 
-        A = np.random.rand(bsz, convex_size)  # bsz x 2
+        A = np.random.rand(bsz, convex_size)        # bsz x 2
         A = A / np.sum(A, axis=1)[:, None]
-
-        # W = np.zeros((bsz, bsz))
-        # W[np.diag_indices(bsz)] = A[:, 0]
-        # # W[zip(np.arange(bsz), J)] = A[:, 1]
-        # W[(np.arange(bsz), J)] = A[:, 1]
-        # W = W / np.sum(W, axis=1)  # broadcasting
 
         Zp = Z @ V
 
@@ -237,8 +286,7 @@ class KoopmanCNN(nn.Module):
         # swap static info
         if fix_motion:
             if duplicate:
-                # print('duplicate')
-                Zp2[:, :, Is] = np.repeat(np.expand_dims(np.mean(Zpc[:, :, Is], axis=1), axis=1), 15, axis=1)
+                Zp2[:, :, Is] = np.repeat(np.expand_dims(np.mean(Zpc[:, :, Is], axis=1), axis=1), 8, axis=1)
             else:
                 Zp2[:, :, Is] = Zpc[:, :, Is]
         # swap dynamic info
@@ -251,11 +299,6 @@ class KoopmanCNN(nn.Module):
         X_dec = self.decoder(torch.from_numpy(Z).to(self.args.device))
 
         return X2_dec, X_dec
-
-    def add_noise_to_input(self, X):
-        blurrer = T.GaussianBlur(kernel_size=(5, 9), sigma=(0.1, 3))
-        X = torch.concat([torch.concat([blurrer(x).unsqueeze(0) for x in X], dim=0) for _ in range(1)])
-        return X
 
 
 class conv(nn.Module):
@@ -285,33 +328,9 @@ class upconv(nn.Module):
 
 
 class encNet(nn.Module):
+
     def __init__(self, args):
         super(encNet, self).__init__()
-
-        self.args = args
-        if args.dataset == 'timit':
-            self.lstm = nn.LSTM(args.fft_size // 2 + 1, args.k_dim, batch_first=True, bias=True, bidirectional=False)
-        else:
-            self.enc_conv = encConv(args)
-            if args.rnn in ["encoder", "both"]:
-                self.lstm = nn.LSTM(args.k_dim, args.k_dim, batch_first=True, bias=True, bidirectional=False)
-
-    def forward(self, x):
-
-        if self.args.dataset == 'timit':
-            x_enc, _ = self.lstm(x)
-
-        else:
-            x_enc = self.enc_conv(x)
-            if self.args.rnn in ["encoder", "both"]:
-                x_enc, _ = self.lstm(x_enc.reshape(-1, self.args.n_frames, self.args.k_dim))
-
-        return x_enc
-
-
-class encConv(nn.Module):
-    def __init__(self, args):
-        super(encConv, self).__init__()
 
         self.args = args
 
@@ -321,6 +340,7 @@ class encConv(nn.Module):
         self.n_width = args.n_width
         self.conv_dim = args.conv_dim
         self.k_dim = args.k_dim
+        self.hidden_dim = args.hidden_dim
 
         self.c1 = conv(self.n_channels, self.conv_dim)
         self.c2 = conv(self.conv_dim, self.conv_dim * 2)
@@ -332,6 +352,10 @@ class encConv(nn.Module):
             nn.Tanh()
         )
 
+        if args.rnn in ["encoder", "both"]:
+            self.lstm = nn.LSTM(self.k_dim, self.hidden_dim, batch_first=True, bias=True,
+                                bidirectional=False)
+
     def forward(self, x):
         x = x.reshape(-1, self.n_channels, self.n_height, self.n_width)
         h1 = self.c1(x)
@@ -339,6 +363,10 @@ class encConv(nn.Module):
         h3 = self.c3(h2)
         h4 = self.c4(h3)
         h5 = self.c5(h4)
+
+        # lstm
+        if self.args.rnn in ["encoder", "both"]:
+            h5 = self.lstm(h5.reshape(-1, self.n_frames, self.k_dim))[0].reshape(-1, self.hidden_dim, 1, 1)
 
         return h5
 
@@ -354,49 +382,40 @@ class decNet(nn.Module):
         self.n_height = args.n_height
         self.n_width = args.n_width
         self.conv_dim = args.conv_dim
-        self.k_dim = args.k_dim
-        self.hidden_dim = args.hidden_dim
-        self.hidden_input_conv_dim = args.hidden_dim
+        self.koopman_dim = args.k_dim
+        self.lstm_hidden_size = args.hidden_dim
 
-        if args.dataset == 'timit':
-            self.lstm = nn.LSTM(args.k_dim, args.fft_size // 2 + 1, batch_first=True, bias=True,
+        if args.lstm_dec_bi:
+            self.koopman_dim = self.koopman_dim * 2
+
+        self.upc1 = nn.Sequential(
+            nn.ConvTranspose2d(self.koopman_dim, self.conv_dim * 8, 4, 1, 0),
+            nn.BatchNorm2d(self.conv_dim * 8),
+            nn.LeakyReLU(0.2, inplace=True)
+        )
+        self.upc2 = upconv(self.conv_dim * 8, self.conv_dim * 4)
+        self.upc3 = upconv(self.conv_dim * 4, self.conv_dim * 2)
+        self.upc4 = upconv(self.conv_dim * 2, self.conv_dim)
+        self.upc5 = nn.Sequential(
+            nn.ConvTranspose2d(self.conv_dim, self.n_channels, 4, 2, 1),
+            nn.Sigmoid()
+        )
+
+        if args.rnn in ["decoder", "both"]:
+            self.lstm = nn.LSTM(self.lstm_hidden_size, self.koopman_dim, batch_first=True, bias=True,
                                 bidirectional=args.lstm_dec_bi)
-        else:
-            if args.rnn in ["decoder", "both"]:
-                self.lstm = nn.LSTM(self.k_dim, self.hidden_dim, batch_first=True, bias=True,
-                                    bidirectional=args.lstm_dec_bi)
-                if args.lstm_dec_bi:
-                    self.hidden_input_conv_dim = args.hidden_dim * 2
-
-            self.upc1 = nn.Sequential(
-                nn.ConvTranspose2d(self.hidden_input_conv_dim, self.conv_dim * 8, 4, 1, 0),
-                nn.BatchNorm2d(self.conv_dim * 8),
-                nn.LeakyReLU(0.2, inplace=True)
-            )
-            self.upc2 = upconv(self.conv_dim * 8, self.conv_dim * 4)
-            self.upc3 = upconv(self.conv_dim * 4, self.conv_dim * 2)
-            self.upc4 = upconv(self.conv_dim * 2, self.conv_dim)
-            self.upc5 = nn.Sequential(
-                nn.ConvTranspose2d(self.conv_dim, self.n_channels, 4, 2, 1),
-                nn.Sigmoid()
-            )
 
     def forward(self, x):
+        # lstm
+        if self.args.rnn in ["decoder", "both"]:
+            x = self.lstm(x.reshape(-1, self.n_frames, self.lstm_hidden_size))[0].reshape(-1, self.koopman_dim, 1, 1)
 
-        if self.args.dataset == 'timit':
-            output, _ = self.lstm(x)
-        else:
-            # lstm
-            if self.args.rnn in ["decoder", "both"]:
-                x, _ = self.lstm(x.reshape(-1, self.n_frames, self.k_dim))
-                x = x.reshape(-1, self.hidden_input_conv_dim, 1, 1)
-
-            d1 = self.upc1(x)
-            d2 = self.upc2(d1)
-            d3 = self.upc3(d2)
-            d4 = self.upc4(d3)
-            output = self.upc5(d4)
-            output = output.view(-1, self.n_frames, self.n_channels, self.n_height, self.n_width)
+        d1 = self.upc1(x)
+        d2 = self.upc2(d1)
+        d3 = self.upc3(d2)
+        d4 = self.upc4(d3)
+        output = self.upc5(d4)
+        output = output.view(-1, self.n_frames, self.n_channels, self.n_height, self.n_width)
 
         return output
 
