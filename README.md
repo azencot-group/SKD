@@ -5,6 +5,17 @@ We propose a simple and easy to code new deep model that is fully unsupervised a
 
 <div align=center><img src="fig/KAE_arch.png" width="70%"></div>
 
+The architercture of our method is demonstrated in the figure above. Further, to promote disentanglement, we introduce a novel eigen loss.
+
+## Experiments
+
+In the experiments directory, you can find the code for the two factor swapping and the multifactor swapping experiments for the sprites dataset, reproducing results from the paper.
+Simply run:
+```
+python ./experiments/disentanglement_swaps.py
+```
+
+
 ## Paper
 ```bibtex
 @inproceedings{
