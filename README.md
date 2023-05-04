@@ -7,6 +7,14 @@ We propose a simple and easy to code new deep model that is fully unsupervised a
 
 The architercture of our method is demonstrated in the figure above. Further, to promote disentanglement, we introduce a novel eigen loss.
 
+## Training
+
+We provide the training file for the sprites dataset. The sprites dataset can be found on a third-party [repo](https://github.com/YingzhenLi/Sprites).
+To run the training process:
+```
+python train.py
+```
+
 ## Experiments
 
 In the experiments directory, you can find the code for the two factor swapping and the multifactor swapping experiments for the sprites dataset, reproducing results from the paper.
