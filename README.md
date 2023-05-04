@@ -9,7 +9,7 @@ The architercture of our method is demonstrated in the figure above. Further, to
 
 ## Training
 
-We provide the training file for the sprites dataset. The sprites dataset can be found on a third-party [repo](https://github.com/YingzhenLi/Sprites).
+We provide the training file for the sprites dataset that enables training from scratch. The sprites dataset can be found on a third-party [repo](https://github.com/YingzhenLi/Sprites).
 To run the training process:
 ```
 python train.py
