@@ -1,3 +1,7 @@
+import os, sys
+
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 import copy
 import torch
 import numpy as np
@@ -24,7 +28,7 @@ class KoopmanCNN(nn.Module):
         self.names = ['total', 'rec', 'predict_ambient', 'predict_latent', 'eigs']
 
     def forward(self, X, train=True):
-        # input noise
+        # input noise added for stability of the Koopman matrix calculation
         if train and self.args.noise in ["input"]:
             blurrer = T.GaussianBlur(kernel_size=(5, 9), sigma=(0.1, 3))
             X = torch.concat([torch.concat([blurrer(x).unsqueeze(0) for x in X], dim=0) for _ in range(1)])
@@ -32,7 +36,7 @@ class KoopmanCNN(nn.Module):
         # ----- X.shape: b x t x c x w x h ------
         Z = self.encoder(X)
 
-        # latent both noise
+        # latent both noise - another option to stabilize the numeric calculation of the Koopman matrix
         if train and self.args.noise in ["latent_both"]:
             Z = Z + 0.25 * torch.rand(Z.shape).to(Z.device)
 
@@ -210,7 +214,7 @@ class KoopmanCNN(nn.Module):
             S1, Z1 = X[ii].squeeze(), Z[ii].squeeze()
 
             A = np.random.rand(convex_size)  # random coefs
-            Ac = np.exp(A)/sum(np.exp(A))  # normalize sum to one
+            Ac = np.exp(A) / sum(np.exp(A))  # normalize sum to one
             Ac = np.expand_dims(Ac, axis=1) @ np.ones((1, convex_size))
 
             J = np.random.permutation(Z.shape[0])[:convex_size]
@@ -260,11 +264,11 @@ class KoopmanCNN(nn.Module):
 
         convex_size = 2
 
-        Js = [np.random.permutation(bsz) for _ in range(convex_size)]       # convex_size permutations
+        Js = [np.random.permutation(bsz) for _ in range(convex_size)]  # convex_size permutations
         # J = np.random.permutation(bsz)              # bsz
         # J2 = np.random.permutation(bsz)
 
-        A = np.random.rand(bsz, convex_size)        # bsz x 2
+        A = np.random.rand(bsz, convex_size)  # bsz x 2
         A = A / np.sum(A, axis=1)[:, None]
 
         Zp = Z @ V

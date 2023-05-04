@@ -1,10 +1,14 @@
+import os, sys
+
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 import torch
 from utils import t_to_np, imshow_seqeunce
 import numpy as np
 
 
 def get_unique_num(D, I, static_number):
-    """ This function gets a parameter for number of unique components. Unique is a componenet with imag part of 0 or
+    """ This function gets a parameter for number of unique components. Unique is a component with imag part of 0 or
         couple of conjugate couple """
     i = 0
     for j in range(static_number):
@@ -20,7 +24,8 @@ def get_unique_num(D, I, static_number):
 
 
 def get_sorted_indices(D, pick_type):
-    # static/dynamic split
+    """ Return the indexes of the eigenvalues (D) sorted by the metric chosen by an hyperparameter"""
+
     if pick_type == 'real':
         I = np.argsort(np.real(D))
     elif pick_type == 'norm':
@@ -36,6 +41,8 @@ def get_sorted_indices(D, pick_type):
 
 
 def static_dynamic_split(D, I, pick_type, static_size):
+    """Return the eigenvalues indexes of the static and dynamic factors"""
+
     static_size = get_unique_num(D, I, static_size)
     if pick_type == 'ball' or pick_type == 'space_ball':
         Is, Id = I[:static_size], I[static_size:]
@@ -45,6 +52,17 @@ def static_dynamic_split(D, I, pick_type, static_size):
 
 
 def swap(model, X, Z, C, indices, static_size, plot=False, pick_type='norm'):
+    """Swaps between two samples in a batch by the indices given
+        :param model - the trained model to use in the swap
+        :param X - the original samples, used for displaying the original
+        :param Z - the latent representation
+        :param C - The koopman matrix. Used to project into the subspaces
+        :param indices - indexes for choosing a pair from the batch
+        :param static_size - the number of eigenvalues that are dedicated to the static subspace.
+         The rest will be for the dynamic subspace
+        :param plot - plot with matplotlib
+        :param pick_type - the metric to pick the static eigenvalues"""
+
     # swap a single pair in batch
     bsz, fsz = X.shape[0:2]
     device = X.device
@@ -85,10 +103,10 @@ def swap(model, X, Z, C, indices, static_size, plot=False, pick_type='norm'):
     if plot:
         titles = ['S{}'.format(ii1), 'S{}'.format(ii2), 'S{}d{}s'.format(ii2, ii2), 'S{}d{}s'.format(ii2, ii1)]
         imshow_seqeunce([[S1], [S2], [S1d2s.squeeze()], [S2d1s.squeeze()]],
-                    plot=plot, titles=np.asarray([titles]).T, figsize=(50, 10), fontsize=50)
+                        plot=plot, titles=np.asarray([titles]).T, figsize=(50, 10), fontsize=50)
 
 
-def swap_by_index(model, X, Z, C, indices, Sev_idx, Dev_idx, plot=False, pick_type='norm', prefix=''):
+def swap_by_index(model, X, Z, C, indices, Sev_idx, Dev_idx, plot=False):
     """ Transfer specific features using static eigenvectors indices and dynamic eigenvectors indices
         Can be used for example to illustrate the multi-factor disentanglement
         indices - tuple of 2 samples
@@ -136,6 +154,6 @@ def swap_by_index(model, X, Z, C, indices, Sev_idx, Dev_idx, plot=False, pick_ty
         titles = ['S{}'.format(ii1), 'S{}'.format(ii2), 'S{}d{}s'.format(ii2, ii2), 'S{}d{}s'.format(ii2, ii1),
                   'S{}s'.format(ii1), 'S{}s'.format(ii2), 'S{}d'.format(ii1), 'S{}d'.format(ii2)]
         imshow_seqeunce([[S1], [S2], [S1d2s.squeeze()], [S2d1s.squeeze()]],
-                    plot=plot, titles=np.asarray([titles[:4]]).T, figsize=(50, 10), fontsize=50)
+                        plot=plot, titles=np.asarray([titles[:4]]).T, figsize=(50, 10), fontsize=50)
 
     return S1d2s, S2d1s, Z1d2s, Z2d1s
